@@ -6,9 +6,17 @@
  *      Author: myan
  */
 #include "defs.h"
+#include "gdbtypes.h"
 #include "heap.h"
+#include "ref.h"
 #include "segment.h"
 #include "search.h"
+#include "x_type.h"
+#include <vector>
+#include <sstream>
+#include <fstream>
+#include <iostream>
+#include <iomanip>
 
 CoreAnalyzerHeapInterface* gCAHeap;
 
@@ -161,9 +169,11 @@ heap_command_impl(char* args)
 	bool cluster_blocks = false;
 	bool top_block = false;
 	bool top_user = false;
+    bool dump = false;
 	bool exlusive_opt = false;
 	bool all_reachable_blocks = false;	// experimental option
 	char* expr = NULL;
+    std::string file_name;
 
 #define check_exclusive_option()	\
 	if (exlusive_opt) {				\
@@ -207,7 +217,10 @@ heap_command_impl(char* args)
 				} else if (strcmp(option, "/topuser") == 0 || strcmp(option, "/tu") == 0) {
 					top_user = true;
 					check_exclusive_option();
-				} else if (strcmp(option, "/all") == 0 || strcmp(option, "/a") == 0) {
+				} else if (strcmp(option, "/dump") == 0 || strcmp(option, "/d") == 0){
+                    dump = true;
+                    check_exclusive_option();
+                } else if (strcmp(option, "/all") == 0 || strcmp(option, "/a") == 0) {
 					all_reachable_blocks = true;
 				} else {
 					CA_PRINT("Invalid option: [%s]\n", option);
@@ -216,7 +229,10 @@ heap_command_impl(char* args)
 			} else if (calc_usage) {
 				expr = option;
 				break;
-			} else if (addr == 0) {
+			} else if (dump) {
+                file_name = option;
+                break;
+            } else if (addr == 0) {
 				addr = ca_eval_address (option);
 			} else {
 				CA_PRINT("Invalid option: [%s]\n", option);
@@ -268,7 +284,13 @@ heap_command_impl(char* args)
 			biggest_heap_owners_generic(n, all_reachable_blocks);
 		else
 			biggest_blocks(n);
-	} else {
+    } else if (dump) {
+        if (file_name.empty())
+        {
+            file_name = "heap_dump";
+        }
+        heap_dump(file_name);
+    } else {
 		if (addr)
 			CA_PRINT("Unexpected address expression\n");
 		else if (!CA_HEAP->heap_walk(addr, verbose))
@@ -982,6 +1004,157 @@ clean_out:
 	return rc;
 }
 
+// Make the display size more easy to read by human
+std::string pretty_size_print(size_t bytes) {
+    std::stringstream ss;
+    ss << std::fixed << std::setprecision(2);
+    if (bytes <= 1024) {
+        ss << bytes << "B";
+    }
+    else if (bytes <= 1024 * 1024) {
+        ss << bytes / 1024.0 << "K";
+    }
+    else if (bytes <= 1024 * 1024 * 1024) {
+        ss << bytes / 1024.0 / 1024.0 << "M";
+    }
+    else {
+        ss << bytes / 1024.0 / 1024.0 / 1024.0 << "G";
+    }
+    return ss.str();
+}
+
+/**
+ * Dump memory usage details.
+ */
+bool heap_dump(const std::string& file_name)
+{
+	std::vector<struct reachable_block> blocks;
+	unsigned long num_blocks;
+    unsigned long  inuse_index;
+	size_t ptr_sz = g_ptr_bit >> 3;
+
+	struct reachable_block *blk;
+	struct object_reference ref;
+
+    std::vector<struct object_type> all_objects;
+    std::unordered_map<std::string, memory_node> node_map;
+
+	// First, create and populate an array of all in-use blocks
+	if (!build_reachable_blocks(blocks)) {
+		CA_PRINT("Failed: no in-use heap block is found\n");
+        return false;
+	}
+	num_blocks = blocks.size();
+    all_objects.resize(num_blocks);
+
+    for (inuse_index = 0; inuse_index < num_blocks; ++inuse_index) {
+        blk = &blocks[inuse_index];
+        object_type& obj = all_objects[inuse_index];
+        obj.obj_name = get_object_type_name(blk->addr);
+        obj.vaddr = blk->addr;
+        obj.size = blk->size;
+
+        if (obj.obj_name.find("|-->") != std::string::npos) {
+            // Cannot find object name, using indirect reference to name it
+            obj.type_name = obj.obj_name;
+        }
+        else {
+            size_t begin = obj.obj_name.find("(type=\"");
+            if (begin == std::string::npos)
+            {
+                continue;
+            }
+            size_t end = obj.obj_name.find("\")", begin + 1);
+            if (end == std::string::npos)
+            {
+                continue;
+            }
+            obj.type_name = obj.obj_name.substr(begin + 1, end - begin - 1);
+        }
+
+        // add memory node
+        const std::string& type_name = obj.obj_name;
+        memory_node& node = node_map[type_name];
+        node.type_name = type_name;
+        node.directly_size += obj.size;
+        node.object_count += 1;
+    }
+
+    ref.storage_type = ENUM_HEAP;
+    for (inuse_index = 0; inuse_index < num_blocks; ++inuse_index) {
+        // Find reference of block.
+        object_type& obj = all_objects[inuse_index];
+        ref.vaddr = obj.vaddr;
+        ref.where.heap.addr = obj.vaddr;
+        ref.where.heap.size = obj.size;
+        ref.where.heap.inuse = 1;
+        set_obj_reference(&obj, ptr_sz, blocks, all_objects);
+        memory_node& node = node_map[obj.type_name];
+        for (size_t i = 0; i < obj.referenced_list.size(); ++i)
+        {
+            object_type* ref_obj = obj.referenced_list.at(i);
+            memory_node& ref_node = node_map[ref_obj->type_name];
+            node.referenced_list.push_back(&ref_node);
+        }
+    }
+
+    size_t min_size = 0;
+    size_t max_size = 0;
+    for (auto it = node_map.begin(); it != node_map.end(); ++it) {
+        size_t size = it->second.directly_size;
+        if (min_size == 0 || size < min_size) {
+            min_size = size;
+        }
+        if (size > max_size) {
+            max_size = size;
+        }
+    }
+
+    std::ofstream ss;
+    ss.open(file_name + ".json", std::ios::out | std::ios::trunc);
+    // Save to file
+    std::string indent = "  ";
+    /** std::stringstream ss; */
+    ss << "{" << std::endl;
+    for (auto it = node_map.begin(); it != node_map.end(); ++it) {
+        const memory_node& node = it->second;
+        // obj begin
+        ss << indent << "\"" << it->first << "\":{" << std::endl;
+
+        // array begin
+        ss << indent << indent
+            << "\"content\":[" << std::endl;
+        // size
+        ss << indent << indent << indent
+            << "\"Directly size:" << pretty_size_print(node.directly_size)
+            << "\","<< std::endl;
+        // count
+        ss << indent << indent << indent
+            << "\"Object count:" << node.object_count << "\"" << std::endl;
+        // array end
+        ss << indent << indent
+            << "]," << std::endl;
+
+        // reference begin
+        ss << indent << indent
+            << "\"edge\":["<< std::endl;
+        for (const auto& ref_obj : node.referenced_list) {
+            ss << indent << indent << indent
+                << "{\"" << ref_obj->type_name << "\":\""
+                << pretty_size_print(ref_obj->directly_size)
+                << "\"}," << std::endl;
+        }
+        ss << indent << indent << "]" << std::endl;
+
+        // obj end
+        ss << indent << "}" << std::endl;
+    }
+    ss << "}";
+    ss.close();
+
+    return true;
+}
+
 /*
  * Given a reference, a variable or a pointer to a heap block, with known size,
  * 	Return its aggregated reachable in-use blocks
@@ -1132,6 +1305,68 @@ calc_aggregate_size(const struct object_reference *ref,
 	// return happily
 	*total_size  = aggr_size;
 	*total_count = aggr_count;
+	return true;
+}
+
+/*
+ * Given a reference, a variable or a pointer to a heap block, with known size,
+ * 	Return its aggregated reachable in-use blocks
+ */
+bool
+set_obj_reference(struct object_type *obj_type,
+                  size_t var_len,
+                  std::vector<struct reachable_block>& inuse_blocks,
+                  std::vector<struct object_type>& obj_types)
+{
+	address_t addr, cursor, end;
+	size_t ptr_sz = g_ptr_bit >> 3;
+	struct reachable_block *blk;
+
+	// Input is a pointer to an in-use memory block
+	if (obj_type->storage_type == ENUM_REGISTER || obj_type->storage_type == ENUM_HEAP)
+	{
+		if (var_len != ptr_sz)
+			return false;
+		blk = find_reachable_block(obj_type->vaddr, inuse_blocks);
+		if (blk)
+		{
+            // search starts with the memory block
+            cursor = blk->addr;
+            end  = cursor + blk->size;
+		}
+		else
+			return false;
+	}
+	// input reference is an object with given size, e.g. a local/global variable
+	else
+	{
+		cursor = obj_type->vaddr;
+		end  = cursor + var_len;
+	}
+
+	// We now have a range of memory to search
+	cursor = ALIGN(cursor, ptr_sz);
+	for (; cursor < end; cursor += ptr_sz)
+	{
+		if(!read_memory_wrapper(NULL, cursor, (void*)&addr, ptr_sz))
+        {
+            continue;
+        }
+		blk = find_reachable_block(addr, inuse_blocks);
+		if (blk)
+		{
+            int index = (blk - &inuse_blocks[0]);
+            if (index < 0 || index > obj_types.size())
+            {
+                CA_PRINT("Out of array range.");
+                continue;
+            }
+            object_type* ref_obj = &obj_types[index];
+            obj_type->referenced_list.push_back(ref_obj);
+            ref_obj->referenced_by.push_back(obj_type);
+		}
+	}
+
 	return true;
 }
 

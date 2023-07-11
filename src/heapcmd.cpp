@@ -369,7 +369,7 @@ switch_heap_command(const char *args, int from_tty)
 		}
 	} else {
 		auto supported_heaps = get_supported_heaps();
-		CA_PRINT("Please provide the heap manager name, currently supported heap managers: %s.\n", supported_heaps.c_str());	
+		CA_PRINT("Please provide the heap manager name, currently supported heap managers: %s.\n", supported_heaps.c_str());
 	}
 	return;
 }
@@ -422,7 +422,9 @@ _initialize_heapcmd ()
 		"   heap [/topblock or /tb] <num>\n"
 		"           option [/topblock] lists biggest <num> heap memory blocks\n"
 		"   heap [/topuser or /tu] <num>\n"
-		"           option [/topuser] lists the top <num> local/global variables that consume the most heap memory\n"),
+		"           option [/topuser] lists the top <num> local/global variables that consume the most heap memory\n"
+		"   heap [/dump or /d] [filename]\n"
+		"           option [/dump] display and dump memory consume size of type\n"),
 		//"   heap [/m]\n"
 		//"           Display heap manager information\n"
 		//"   heap [/fragmentation or /f]\n"

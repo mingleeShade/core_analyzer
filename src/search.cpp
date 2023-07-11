@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <list>
 #include <set>
+#include <sstream>
+#include <string>
 #include "search.h"
 #include "segment.h"
 #include "heap.h"
@@ -246,7 +248,7 @@ search_value_internal(const std::list<struct object_range*>& targets,
 				address_t val   = 0xdeadbeef;
 				address_t vaddr = 0xdeadbeef;
 
-				if(search_value_by_range(segment, &next_bit_index, &target_array[0], target_is_ptr, &val, &vaddr))
+                if(search_value_by_range(segment, &next_bit_index, &target_array[0], target_is_ptr, &val, &vaddr))
 				{
 					// find a match in this segment
 					bool valid_ref = false;
@@ -920,6 +922,184 @@ bool find_object_type(address_t obj_vaddr)
 	return lbFound;
 }
 
+
+/////////////////////////////////////////////////////////////////////////
+// Vertical search.
+//     Find a recognizable object to identify the type associated with
+//     the memory, and return object type name
+/////////////////////////////////////////////////////////////////////////
+std::string get_object_type_name(address_t obj_vaddr)
+{
+    bool lbFound = false;
+	int i;
+	unsigned int n;
+	struct object_reference* ref;
+	std::list<struct object_reference*> ref_list;
+
+	// references are placed in an array
+	std::vector<struct object_reference*> refs;
+
+    std::string type_name;
+	// sanity check
+	if (!get_segment(obj_vaddr, 1))
+	{
+        type_name = "Unknow: Address is not in target's address space";
+		return type_name;
+	}
+
+	// the 1st element is the searched target
+	ref = new struct object_reference;
+	ref->level = 0;
+	ref->target_index = -1;
+	ref->storage_type = ENUM_UNKNOWN;
+	ref->vaddr        = obj_vaddr;
+	ref->value        = 0;
+	ref->where.target.size = 1;
+	refs.push_back(ref);
+
+	fill_ref_location(ref);
+
+	// There is no need to dig deeper for free heap block, or
+	// if the target is a heap object w/ _vptr
+	if (ref->storage_type == ENUM_REGISTER
+			|| ref->storage_type == ENUM_STACK
+			|| ref->storage_type == ENUM_MODULE_TEXT
+			|| ref->storage_type == ENUM_MODULE_DATA
+			|| (ref->storage_type == ENUM_HEAP && ref->where.heap.inuse && is_heap_object_with_vptr(ref, NULL, 0)))
+		lbFound = true;
+	else if (ref->storage_type == ENUM_HEAP && !ref->where.heap.inuse)
+		lbFound = false;
+	else
+	{
+		// Deep search of heap objects
+		for (n=0; !lbFound && n<g_max_indirection_level; n++)
+		{
+			int vec_sz = refs.size();
+			if (refs[vec_sz-1]->level != n)	// no more candidate to search
+				break;
+
+			for (i=vec_sz-1; !lbFound && i>=0 && refs[i]->level==n; i--)
+			{
+				bool target_is_ptr = true;
+				std::list<struct object_range*> targets;
+				struct object_range target;
+				target.low = ref->vaddr;
+				target.high = target.low + 1;
+				// searched target can only be heap block or unknown
+				ref = refs[i];
+				if (ref->storage_type == ENUM_HEAP)
+				{
+					target.low = ref->where.heap.addr;
+					target.high = target.low + ref->where.heap.size;
+				}
+				else if (ref->target_index < 0)
+				{
+					target_is_ptr = false;
+					target.high = target.low + ref->where.target.size;
+				}
+				targets.push_front(&target);
+
+				// invoke full-core memory search
+				if (search_value_internal(targets, target_is_ptr, ENUM_ALL, ref_list) )
+				{
+					// first scan for known symbol
+					std::set<struct object_reference*> validRefs;
+					for (auto aref : ref_list) {
+						if ( (aref->storage_type == ENUM_STACK && aref->where.stack.frame >= 0)
+							|| aref->storage_type == ENUM_REGISTER
+							|| aref->storage_type == ENUM_MODULE_DATA
+							|| (aref->storage_type==ENUM_HEAP && aref->where.heap.inuse && known_heap_block(aref)) )
+						{
+							// find a known symbol that references the target address
+							lbFound = true;
+							validRefs.insert(aref);
+						}
+					}
+					if (!lbFound) {
+						// second scan if none of the refs is good
+						// select proper refs as the next-level search targets
+						for (auto aref : ref_list) {
+							// only consider in-use heap block
+							if (aref->storage_type == ENUM_HEAP && aref->where.heap.inuse) {
+								// remove self-reference
+								bool selfRef = false;
+								for (int refidx=refs.size()-1; refidx>=0; refidx--)
+								{
+									const struct object_reference* cursor = refs[refidx];
+									if (cursor->storage_type == ENUM_HEAP && cursor->where.heap.addr == aref->where.heap.addr)
+									{
+										selfRef = true;
+										break;
+									}
+								}
+								if (!selfRef)
+									validRefs.insert(aref);
+							} else if (aref->storage_type == ENUM_MODULE_TEXT) {
+								if (!global_text_ref(aref))
+									validRefs.insert(aref);
+							}
+						}
+					}
+					for (auto aref : ref_list) {
+						// append the valid refs as either result or targets of the next-level search
+						if (validRefs.find(aref) != validRefs.end()) {
+							aref->level = n + 1;
+							aref->target_index = i;
+							refs.push_back(aref);
+						} else {
+							// free others
+							delete aref;
+						}
+					}
+				}
+				ref_list.clear();
+			}
+		}
+		ref_list.clear();
+
+		//if (n == g_max_indirection_level)
+		//	CA_PRINT("Warning: max levels of indirection %d has been reached\n", g_max_indirection_level);
+	}
+
+	// display the result
+	clear_addr_type_map();
+	if (lbFound)
+	{
+		int count;
+		n = refs.back()->level;
+		for (i=refs.size()-1, count=1; i>=0 && refs[i]->level==n; i--)
+		{
+			ref = refs[i];
+			if ( (ref->storage_type == ENUM_STACK && ref->where.stack.frame >= 0)
+				|| ref->storage_type == ENUM_REGISTER
+				|| ref->storage_type == ENUM_MODULE_DATA
+				|| ref->storage_type == ENUM_MODULE_TEXT
+				|| (ref->storage_type==ENUM_HEAP && is_heap_object_with_vptr(ref, NULL, 0)) )
+			{
+				int indent = 0;
+				int next_ref_index = i;
+				count++;
+				clear_addr_type_map();
+				while (next_ref_index >= 0)
+				{
+					ref = refs[next_ref_index];
+					type_name.append(get_ref_name(ref, indent, indent>0, true));	// verbose
+					next_ref_index = ref->target_index;
+					indent++;
+				}
+                // only get one ref stack
+                break;
+			}
+		}
+	}
+	clear_addr_type_map();
+
+	// clean up
+	for (auto aref : refs)
+		delete aref;
+    return type_name;
+}
+
 /////////////////////////////////////////////////////////////////////////
 // Return a list of C++ objects with _vptr to the type of the input expression
 //   the caller is responsible to release the list and its elements
@@ -1374,6 +1554,63 @@ void print_ref
 			CA_PRINT(": " PRINT_FORMAT_POINTER "", ref->value);
 	}
 	CA_PRINT("\n");
+}
+
+/////////////////////////////////////////////////////////////////////////
+// Get name of reference
+/////////////////////////////////////////////////////////////////////////
+std::string get_ref_name
+(const struct object_reference* ref, unsigned int indent, bool print_arrow, bool verbose)
+{
+	unsigned int i;
+    std::stringstream ss;
+	for (i=0; i<indent; i++)
+        ss << "    ";
+	if (print_arrow)
+        ss << "|--> ";
+
+	if (ref->storage_type == ENUM_REGISTER)
+	{
+        ss << "[register]";
+		ss << get_register_ref_name(ref);
+	}
+	else if (ref->storage_type == ENUM_STACK)
+	{
+        ss << "[stack]";
+		ss << get_stack_ref_name(ref);
+	}
+	else if (ref->storage_type == ENUM_MODULE_TEXT || ref->storage_type == ENUM_MODULE_DATA)
+	{
+		if (ref->storage_type == ENUM_MODULE_TEXT)
+			ss << "[.text/.rodata]";
+		else
+            ss << "[.data/.bss]";
+		ss << get_global_ref_name(ref);
+	}
+	else if (ref->storage_type == ENUM_HEAP)
+	{
+		ss << std::hex << "[heap block] 0x" << ref->where.heap.addr
+            << "--0x" << ref->where.heap.addr+ref->where.heap.size
+            << " size=" << ref->where.heap.size << std::dec;
+		if (verbose)
+		{
+			ss << get_heap_ref_name(ref);
+			if (ref->target_index >= 0 || ref->vaddr != ref->where.heap.addr)
+			{
+                ss << " @+" << ref->vaddr - ref->where.heap.addr;
+				if (ref->value)
+                    ss << std::hex << ": 0x" << ref->value << std::dec;
+			}
+		}
+	}
+	else
+	{
+        ss << std::hex << "[unknown] 0x" << ref->vaddr << std::dec;
+		if (ref->value)
+            ss << std::hex <<": 0x" << ref->value << std::dec;
+	}
+    ss << "\n";
+    return ss.str();
 }
 
 /////////////////////////////////////////////////////////////////////////

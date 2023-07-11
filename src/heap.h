@@ -13,10 +13,10 @@
 
 struct inuse_block
 {
-	inuse_block(address_t a, size_t s) : addr(a), size(s) {}
-	inuse_block(const struct inuse_block &blk) : addr(blk.addr), size(blk.size) {}
-	address_t addr;
-	size_t    size;
+    inuse_block(address_t a, size_t s) : addr(a), size(s) {}
+    inuse_block(const struct inuse_block& blk) : addr(blk.addr), size(blk.size) {}
+    address_t addr;
+    size_t    size;
 };
 
 /*
@@ -24,21 +24,47 @@ struct inuse_block
  * Aggregated memory is the collection of memory blocks that are reachable from
  * either a global variable or a local variable
  */
-struct reachable_block : public inuse_block {
-	reachable_block(address_t a, size_t s) : inuse_block(a, s) {}
-	reachable_block(const struct inuse_block &blk) : inuse_block(blk) {}
-	~reachable_block() {
-		if (index_map)
-			free(index_map);
-	}
+struct reachable_block : public inuse_block
+{
+    reachable_block(address_t a, size_t s) : inuse_block(a, s) {}
+    reachable_block(const struct inuse_block& blk) : inuse_block(blk) {}
+    ~reachable_block()
+    {
+        if (index_map)
+        {
+            free(index_map);
+        }
+    }
 
-	size_t        aggr_size  = 0;		// cached reachable count/size by me (solely)
-	unsigned long aggr_count = 0;
-	unsigned int* index_map  = nullptr;	// cached indexes of all sub in-use blocks
+    size_t        aggr_size  = 0;       // cached reachable count/size by me (solely)
+    unsigned long aggr_count = 0;
+    unsigned int* index_map  = nullptr; // cached indexes of all sub in-use blocks
+};
+
+struct memory_node
+{
+    std::string type_name;
+    int object_count = 0;
+    size_t directly_size = 0;
+    size_t referenced_size = 0;
+    std::vector<memory_node*> referenced_list;
+};
+
+struct object_type
+{
+    std::string obj_name;
+    std::string type_name;
+    address_t vaddr = 0;
+    size_t size = 0;
+    size_t directly_size = 0;
+    enum storage_type  storage_type;
+    std::vector<object_type*> referenced_list;
+    // store object_list that reference this object for easy traceability
+    std::vector<object_type*> referenced_by;
 };
 
 
-typedef const char * (*HeapVersionFunc)(void);
+typedef const char* (*HeapVersionFunc)(void);
 typedef bool (*InitHeapFunc)(void);
 typedef bool (*HeapWalkFunc)(address_t addr, bool verbose);
 typedef bool (*IsHeapBlockFunc)(address_t addr);
@@ -50,9 +76,10 @@ typedef bool (*WalkInuseBlocksFunc)(struct inuse_block* opBlocks, unsigned long*
 
 /** Different programs might use different heap managers
  * This heap interface is the abstract interface for each heap manager
- * 
+ *
 **/
-struct CoreAnalyzerHeapInterface {
+struct CoreAnalyzerHeapInterface
+{
     HeapVersionFunc heap_version;
     InitHeapFunc init_heap;
     HeapWalkFunc heap_walk;
@@ -62,8 +89,8 @@ struct CoreAnalyzerHeapInterface {
     GetBiggestBlocksFunc get_biggest_blocks;
     /*
     * Get all in-use memory blocks
-    * 	If param opBlocks is NULL, return number of in-use only,
-    * 	otherwise, populate the array with all in-use block info
+    *   If param opBlocks is NULL, return number of in-use only,
+    *   otherwise, populate the array with all in-use block info
     */
     WalkInuseBlocksFunc walk_inuse_blocks;
 
@@ -109,25 +136,33 @@ extern bool biggest_blocks(unsigned int num);
 extern bool biggest_heap_owners_generic(unsigned int num, bool all_reachable_blocks);
 extern void print_size(size_t sz);
 
+extern bool heap_dump(const std::string& file_name);
+
 extern bool
-calc_aggregate_size(const struct object_reference *ref,
-					size_t var_len,
-					bool all_reachable_blocks,
-					std::vector<struct reachable_block>& inuse_blocks,
-					size_t *aggr_size,
-					unsigned long *count);
+calc_aggregate_size(const struct object_reference* ref,
+                    size_t var_len,
+                    bool all_reachable_blocks,
+                    std::vector<struct reachable_block>& inuse_blocks,
+                    size_t* aggr_size,
+                    unsigned long* count);
+
+extern bool
+set_obj_reference(struct object_type* obj_type,
+                  size_t var_len,
+                  std::vector<struct reachable_block>& inuse_blocks,
+                  std::vector<struct object_type>& obj_types);
 
 /*
  * Histogram of heap blocks
  */
 struct MemHistogram
 {
-	unsigned int   num_buckets;
-	size_t*        bucket_sizes;
-	unsigned long* inuse_cnt;
-	size_t*        inuse_bytes;
-	unsigned long* free_cnt;
-	size_t*        free_bytes;
+    unsigned int   num_buckets;
+    size_t*        bucket_sizes;
+    unsigned long* inuse_cnt;
+    size_t*        inuse_bytes;
+    unsigned long* free_cnt;
+    size_t*        free_bytes;
 };
 extern void display_mem_histogram(const char*);
 extern void init_mem_histogram(unsigned int nbuckets);

@@ -15,6 +15,7 @@
  * Exposed functions
  */
 extern bool find_object_type(address_t addr);
+extern std::string get_object_type_name(address_t addr);
 
 extern bool find_object_refs(address_t addr, size_t size, unsigned int iLevel);
 extern std::list<struct object_reference*>
@@ -36,6 +37,7 @@ extern void set_shared_objects_indirection_level(unsigned int);
 extern void print_memory_pattern(address_t lo, address_t hi);
 
 extern void print_ref(const struct object_reference*, unsigned int, bool, bool);
+extern std::string get_ref_name(const struct object_reference*, unsigned int, bool, bool);
 
 extern void fill_ref_location(struct object_reference*);
 

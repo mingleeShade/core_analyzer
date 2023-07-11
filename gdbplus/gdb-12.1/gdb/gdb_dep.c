@@ -14,6 +14,7 @@
 #endif
 
 #include <sys/param.h>
+#include <sstream>
 #include "dis-asm.h"
 #include "readline/readline.h"
 #include "build-id.h"
@@ -452,7 +453,7 @@ update_memory_segments_and_heaps(void)
 	{
 		/*
 		 * Don't need to update if target is core file, or live process
-		 * didn't change 
+		 * didn't change
 		 */
 		if (g_debug_core || linux_nat_find_memory_regions(false))
 			return true;
@@ -924,6 +925,78 @@ print_type_name(struct type *type, const char* field_name,
 }
 
 /*
+ * Get type name
+ */
+std::string
+get_type_name(struct type *type, const char* field_name,
+		const char* prefix, const char* postfix)
+{
+	int deref_count = 0;
+	bool pointer_type = true;
+    std::stringstream ss;
+
+	check_typedef (type);
+
+	/* get base type if it is pointer/reference type */
+	if (type->code() == TYPE_CODE_PTR)
+	{
+		pointer_type = true;
+		while (type->code() == TYPE_CODE_PTR)
+		{
+			type = TYPE_TARGET_TYPE(type);
+			deref_count++;
+		}
+	}
+	else if (type->code() == TYPE_CODE_REF)
+	{
+		pointer_type = false;
+		deref_count++;
+		type = TYPE_TARGET_TYPE(type);
+	}
+	else if (type->code() == TYPE_CODE_ARRAY)
+	{
+		/* special treatment of array */
+		struct type *target_type = TYPE_TARGET_TYPE (type);
+		if (prefix)
+            ss << prefix;
+        ss << get_type_name(target_type, NULL, NULL, NULL);
+		LONGEST low_bound, high_bound;
+		if (get_array_bounds(type, &low_bound, &high_bound))
+		{
+            ss << "[" << high_bound+1 << "]";
+		}
+		else
+            ss << "[]\")";
+		if (field_name)
+            ss << " " << field_name;
+		if (postfix)
+            ss << postfix;
+		return ss.str();
+	}
+
+	//if (type_name_no_tag(type))
+	{
+		if (prefix)
+            ss << prefix;
+
+		if (type->name())
+            ss << "struct ";
+        ss << TYPE_SAFE_NAME(type);
+
+		for (; deref_count > 0; deref_count--)
+		{
+			if (pointer_type)
+                ss << "*";
+		}
+		if (field_name)
+            ss << " " << field_name;
+		if (postfix)
+            ss << postfix;
+	}
+    return ss.str();
+}
+
+/*
  * Display the struct's data member at offset
  */
 static void
@@ -1010,6 +1083,95 @@ print_struct_field(const struct object_reference* ref,
 		add_addr_type(ref->value, TYPE_TARGET_TYPE(type), NULL);
 }
 
+/*
+ * Get the struct's data member at offset
+ */
+static std::string
+get_struct_field_name(const struct object_reference* ref,
+		   struct type *type, size_t offset)
+{
+	check_typedef (type);
+    std::stringstream ss;
+
+	/* If there is nothing referenced, don't drill down to sub field */
+	if (offset == 0 && (ref->value==0 || !get_segment(ref->value, 1)) )
+		return ss.str();
+
+	if (type->code() == TYPE_CODE_ARRAY)
+	{
+		LONGEST low_bound, high_bound;
+		if (get_array_bounds(type, &low_bound, &high_bound))
+		{
+			struct type *target_type = check_typedef (TYPE_TARGET_TYPE (type));
+			unsigned int elem_sz = TYPE_LENGTH(target_type);
+			unsigned int index = low_bound + offset / elem_sz;
+			if (offset == 0)
+			{
+                ss << get_type_name(type, NULL, " (type=\"", "\")");
+				return ss.str();
+			}
+			else if (index <= high_bound)
+                ss << "[" << index << "]";
+			else
+                ss << "[?]";
+			ss << get_struct_field_name(ref, target_type, offset - index * elem_sz);
+		}
+		else
+            ss << "[??]";
+		return ss.str();
+	}
+	else if (type->code() == TYPE_CODE_STRUCT || type->code() == TYPE_CODE_UNION)
+	{
+		int i, num_fields, num_baseclasses;
+		num_fields = type->num_fields();
+		num_baseclasses = TYPE_N_BASECLASSES (type);
+		/*
+		 * The first num_baseclasses fields are base classes, followed
+		 * by type's data member
+		 * Their sum is num_fields
+		 * Also make sure field type is fleshed out before use
+		 */
+		for (i = 0; i < num_fields; i++)
+		{
+			struct type* field_type = type->field(i).type();
+			size_t pos, field_size;
+
+			/* static member */
+			if (type->field(i).loc_kind() != FIELD_LOC_KIND_BITPOS)
+				continue;
+
+			check_typedef(field_type);
+			pos = type->field(i).loc_bitpos() / 8;
+			field_size = field_type->length;
+			if ( i+1 < num_fields
+				&& field_size == 1
+				&& (type->field(i+1).loc_bitpos() / 8) == pos )
+				continue;
+			else if (field_size > 0 && offset >= pos && offset < pos + field_size)
+			{
+				/* base classes come first in the type's fields */
+				if (i < num_baseclasses)
+				{
+					const char* name = field_type->name();
+					/* quote the base name that consists of namespace specifier */
+					if (strstr(name, "::"))
+                        ss << "::\"" << name << "\"";
+					else
+                        ss << "::" << name;
+				}
+				else
+                    ss << "." << type->field(i).name();
+
+				ss << get_struct_field_name(ref, field_type, offset - pos);
+				break;
+			}
+		}
+	}
+	else if (type->code() == TYPE_CODE_PTR || type->code() == TYPE_CODE_REF)
+		add_addr_type(ref->value, TYPE_TARGET_TYPE(type), NULL);
+    return ss.str();
+}
+
 void
 print_register_ref(const struct object_reference* ref)
 {
@@ -1024,6 +1186,24 @@ print_register_ref(const struct object_reference* ref)
 	if (g_debug_context.tid != ref->where.stack.tid)
 		CA_PRINT(" thread %d", ref->where.reg.tid);
 	CA_PRINT(" %s=" PRINT_FORMAT_POINTER, reg_name, ref->value);
+}
+
+std::string
+get_register_ref_name(const struct object_reference* ref)
+{
+    std::stringstream ss;
+	const char* reg_name;
+	if (!ref->where.reg.name)
+	{
+		struct gdbarch *gdbarch = get_current_arch();
+		reg_name = gdbarch_register_name (gdbarch, ref->where.reg.reg_num);
+	}
+	else
+		reg_name = ref->where.reg.name;
+	if (g_debug_context.tid != ref->where.stack.tid)
+        ss << " thread %d" << ref->where.reg.tid;
+    ss << " " << reg_name << "=" << ref->value;
+    return ss.str();
 }
 
 int
@@ -1308,6 +1488,50 @@ print_stack_ref(const struct object_reference* ref)
 		printf_filtered(_(": 0x%lx"), ref->value);
 }
 
+std::string
+get_stack_ref_name(const struct object_reference* ref)
+{
+	struct symbol* sym;
+	address_t sym_addr;
+	size_t    sym_size;
+    std::stringstream ss;
+
+	/* display thread id and frame number if they are not selected values */
+	if (g_debug_context.tid != ref->where.stack.tid)
+	{
+        ss << " thread " << ref->where.stack.tid
+            << " frame " << ref->where.stack.frame;
+	}
+	else if (g_debug_context.frame_level != ref->where.stack.frame)
+        ss << " frame " << ref->where.stack.frame;
+
+	sym = get_stack_sym(ref, &sym_addr, &sym_size);
+	if (sym)
+	{
+		/* if the ref belongs to a local symbol, display in detail */
+        ss << sym->natural_name();
+		ss << get_struct_field_name(ref, sym->type(), ref->vaddr - sym_addr);
+	}
+	else
+	{
+		/* if no named local var is found, just print its sp offset */
+		if (ref->where.stack.frame >= 0)
+		{
+			if (ref->where.stack.offset == 0)
+                ss << " SP";
+			else
+                ss << " rsp+" << ref->where.stack.offset;
+		}
+		else
+            ss << " below rsp";
+	}
+
+    ss << " @0x" << std::hex << ref->vaddr;
+	if (ref->value)
+        ss << ": 0x" << std::hex << ref->value;
+    return ss.str();
+}
+
 void
 print_global_ref (const struct object_reference* ref)
 {
@@ -1334,6 +1558,36 @@ print_global_ref (const struct object_reference* ref)
 
 	if (ref->target_index >= 0 && ref->value)
 		printf_filtered (_(": 0x%lx"), ref->value);
+}
+
+std::string
+get_global_ref_name (const struct object_reference* ref)
+{
+	struct symbol* sym;
+	struct minimal_symbol* msym;
+	address_t sym_addr;
+	size_t    sym_size;
+    std::stringstream ss;
+
+    ss << " " << ref->where.module.name;
+	if ( (sym = get_global_sym(ref, &sym_addr, &sym_size)) ) {
+		/* if the ref belongs to a global symbol, display in detail */
+        ss << " " << sym->natural_name();
+        ss << get_struct_field_name(ref, sym->type(), ref->vaddr - sym_addr);
+		if (ref->target_index >= 0)
+			ss << std::hex << " @0x" << ref->vaddr << std::dec;
+	} else if ( (msym = get_global_minimal_sym(ref, &sym_addr, &sym_size)) ) {
+        ss << std::hex << " " << msym->natural_name()
+            << " (0x" << sym_addr << "--0x" << sym_addr+sym_size << ")" << std::dec;
+		if (ref->target_index >= 0)
+            ss << std::hex << " @0x" << ref->vaddr << std::dec;
+	} else {
+        ss << std::hex << "  Unknown global 0x" << ref->vaddr << std::dec;
+	}
+
+	if (ref->target_index >= 0 && ref->value)
+        ss << std::hex << ": 0x" << ref->value << std::dec;
+    return ss.str();
 }
 
 void
@@ -1401,6 +1655,75 @@ print_heap_ref(const struct object_reference* ref)
 	else {
 		CA_PRINT(" FREE");
 	}
+}
+
+std::string
+get_heap_ref_name(const struct object_reference* ref)
+{
+    std::stringstream ss;
+	if (ref->where.heap.inuse)
+	{
+		char obj_name[NAME_BUF_SZ];
+		struct type *type = NULL;
+		size_t offset = 0;
+
+		/*
+		 * some application put multiple objects on a pre-allocated buffer
+		 * make sure we get the type right
+		 */
+		struct ca_addr_type_pair* addr_type = lookup_type_by_addr(ref->vaddr);
+		if (addr_type)
+		{
+			type = addr_type->type;
+			if (addr_type->sym)
+			{
+				/*
+				 * the heap block is pointed to by a symbol
+				 * (e.g. local/global variable)
+				 */
+                ss << " " << addr_type->sym->natural_name();
+			}
+			else if (addr_type->type)
+			{
+				/* This heap block is referenced by an object
+				 * whose type is known
+				 */
+                ss << get_type_name(type, NULL, " (type=\"", "\")");
+			}
+			offset = ref->vaddr - addr_type->addr;
+		}
+		/* special care is taken for heap object w/ _vptr */
+		else if (is_heap_object_with_vptr(ref, obj_name, NAME_BUF_SZ))
+		{
+			size_t size_t_sz = g_ptr_bit >> 3;
+			/*
+			 * make sure the size of the object agrees with the size
+			 * of the heap block
+			 */
+			struct symbol *sym = lookup_symbol(obj_name, 0, STRUCT_DOMAIN, 0).symbol;
+			if (sym != NULL &&
+			    TYPE_LENGTH(sym->type()) <= ref->where.heap.size &&
+			    TYPE_LENGTH(sym->type()) + 2 * size_t_sz >= ref->where.heap.size) {
+				type = sym->type();
+                ss << get_type_name(type, NULL, " (type=\"", "\")");
+				add_addr_type (ref->where.heap.addr, type, NULL);
+			} else {
+                ss << " (type=\"" << obj_name << "\")";
+			}
+			offset = ref->vaddr - ref->where.heap.addr;
+		}
+
+		/* print sub field if any */
+		if (type &&
+		    (type->code() == TYPE_CODE_STRUCT || type->code() == TYPE_CODE_UNION) &&
+		    (ref->value || offset > 0) ) {
+            ss << get_struct_field_name(ref, type, offset);
+		}
+	}
+	else {
+        ss << " FREE";
+	}
+    return ss.str();
 }
 
 address_t
