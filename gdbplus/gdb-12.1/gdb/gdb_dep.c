@@ -1145,6 +1145,7 @@ get_struct_field_name(const struct object_reference* ref,
 			field_size = field_type->length;
 			if ( i+1 < num_fields
 				&& field_size == 1
+                && (type->field(i+1).loc_kind() == FIELD_LOC_KIND_BITPOS)
 				&& (type->field(i+1).loc_bitpos() / 8) == pos )
 				continue;
 			else if (field_size > 0 && offset >= pos && offset < pos + field_size)

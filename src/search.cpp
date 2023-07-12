@@ -7,11 +7,11 @@
 #include <algorithm>
 #include <list>
 #include <set>
-#include <sstream>
-#include <string>
 #include "search.h"
 #include "segment.h"
 #include "heap.h"
+#include <sstream>
+#include <string>
 
 /////////////////////////////////////////////////////
 // Data Structures used for implementation

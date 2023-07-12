@@ -39,12 +39,16 @@ cp -uv $build_folder/gdb-$gdb_version/gdb/heap_tcmalloc.h $PROJECT_FOLDER/gdbplu
 cp -uv $build_folder/gdb-$gdb_version/gdb/heapcmd.c $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
 cp -uv $build_folder/gdb-$gdb_version/gdb/i386-decode.c $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
 cp -uv $build_folder/gdb-$gdb_version/gdb/ref.h $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
+cp -uv $build_folder/gdb-$gdb_version/gdb/regcache.c $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
+cp -uv $build_folder/gdb-$gdb_version/gdb/regcache.h $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
 cp -uv $build_folder/gdb-$gdb_version/gdb/search.c $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
 cp -uv $build_folder/gdb-$gdb_version/gdb/search.h $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
 cp -uv $build_folder/gdb-$gdb_version/gdb/segment.c $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
 cp -uv $build_folder/gdb-$gdb_version/gdb/segment.h $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
 cp -uv $build_folder/gdb-$gdb_version/gdb/x_dep.h $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
 cp -uv $build_folder/gdb-$gdb_version/gdb/x_type.h $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
+cp -uv $build_folder/gdb-$gdb_version/gdb/value.c $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
+cp -uv $build_folder/gdb-$gdb_version/gdb/value.h $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/
 cp -uv $build_folder/gdb-$gdb_version/gdb/python/py-heap.c $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/python
 cp -uv $build_folder/gdb-$gdb_version/gdb/python/py-ref.c $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/python
 cp -uv $build_folder/gdb-$gdb_version/gdb/python/python-internal.h $PROJECT_FOLDER/gdbplus/gdb-$gdb_version/gdb/python
